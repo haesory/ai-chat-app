@@ -1,14 +1,15 @@
 "use client";
 
-import { useState, useRef, useCallback, type KeyboardEvent } from "react";
+import { useState, useRef, useCallback, type KeyboardEvent, type ReactNode } from "react";
 
 interface ChatInputProps {
   onSend: (message: string) => void;
   isStreaming: boolean;
   onCancel: () => void;
+  toolsSlot?: ReactNode;
 }
 
-export function ChatInput({ onSend, isStreaming, onCancel }: ChatInputProps) {
+export function ChatInput({ onSend, isStreaming, onCancel, toolsSlot }: ChatInputProps) {
   const [input, setInput] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -42,6 +43,7 @@ export function ChatInput({ onSend, isStreaming, onCancel }: ChatInputProps) {
   return (
     <div className="border-t border-foreground/10 bg-background px-4 py-3">
       <div className="mx-auto flex max-w-3xl items-end gap-2">
+        {toolsSlot}
         <textarea
           ref={textareaRef}
           value={input}

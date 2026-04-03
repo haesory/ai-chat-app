@@ -1,22 +1,29 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, Fragment } from "react";
 import { ChatBubble } from "./ChatBubble";
+import { ToolCallBubble } from "./ToolCallBubble";
 import { StreamingIndicator } from "./StreamingIndicator";
-import type { ChatMessage } from "@/lib/types";
+import type { ChatMessage, ToolCallInfo } from "@/lib/types";
 
 interface ChatTimelineProps {
   messages: ChatMessage[];
   streamingContent: string;
   isStreaming: boolean;
+  streamingToolCalls?: ToolCallInfo[];
 }
 
-export function ChatTimeline({ messages, streamingContent, isStreaming }: ChatTimelineProps) {
+export function ChatTimeline({
+  messages,
+  streamingContent,
+  isStreaming,
+  streamingToolCalls,
+}: ChatTimelineProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streamingContent]);
+  }, [messages, streamingContent, streamingToolCalls]);
 
   if (messages.length === 0 && !isStreaming) {
     return (
@@ -35,12 +42,32 @@ export function ChatTimeline({ messages, streamingContent, isStreaming }: ChatTi
     <div className="flex-1 overflow-y-auto px-4 py-6" role="log" aria-label="Chat messages">
       <div className="mx-auto flex max-w-3xl flex-col gap-3">
         {messages.map((msg) => (
-          <ChatBubble key={msg.id} role={msg.role} content={msg.content} />
+          <Fragment key={msg.id}>
+            {msg.toolCalls && msg.toolCalls.length > 0 && (
+              <div className="flex flex-col gap-1.5">
+                {msg.toolCalls.map((tc) => (
+                  <ToolCallBubble key={tc.id} toolCall={tc} />
+                ))}
+              </div>
+            )}
+            <ChatBubble role={msg.role} content={msg.content} />
+          </Fragment>
         ))}
+
+        {isStreaming && streamingToolCalls && streamingToolCalls.length > 0 && (
+          <div className="flex flex-col gap-1.5">
+            {streamingToolCalls.map((tc) => (
+              <ToolCallBubble key={tc.id} toolCall={tc} />
+            ))}
+          </div>
+        )}
+
         {isStreaming && streamingContent && (
           <ChatBubble role="assistant" content={streamingContent} isStreaming />
         )}
-        {isStreaming && !streamingContent && <StreamingIndicator />}
+        {isStreaming && !streamingContent && (!streamingToolCalls || streamingToolCalls.length === 0) && (
+          <StreamingIndicator />
+        )}
         <div ref={bottomRef} />
       </div>
     </div>
