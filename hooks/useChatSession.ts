@@ -1,50 +1,29 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
-import {
-  readStorage,
-  writeStorage,
-  removeStorage,
-} from "./useLocalStorage";
-import { STORAGE_KEYS } from "@/lib/storage-keys";
+import { useState, useCallback, useRef, useEffect } from "react";
+import { supabase, rowToSession, rowToMessage } from "@/lib/supabase";
 import type { ChatMessage, ChatSessionMeta } from "@/lib/types";
 
-function makeSession(): ChatSessionMeta {
+function makeSessionRow(): {
+  id: string;
+  title: string;
+  created_at: number;
+  updated_at: number;
+} {
   const now = Date.now();
   return {
     id: crypto.randomUUID(),
     title: "새 대화",
-    createdAt: now,
-    updatedAt: now,
+    created_at: now,
+    updated_at: now,
   };
 }
 
-function loadSessions(): ChatSessionMeta[] {
-  return readStorage<ChatSessionMeta[]>(STORAGE_KEYS.SESSIONS, []);
-}
-
-function loadActiveId(sessions: ChatSessionMeta[]): string {
-  const stored = readStorage<string | null>(STORAGE_KEYS.ACTIVE_SESSION, null);
-  if (stored && sessions.some((s) => s.id === stored)) return stored;
-  return sessions[0]?.id ?? "";
-}
-
-function loadMessages(sessionId: string): ChatMessage[] {
-  if (!sessionId) return [];
-  return readStorage<ChatMessage[]>(
-    STORAGE_KEYS.sessionMessages(sessionId),
-    [],
-  );
-}
-
 export function useChatSession() {
-  const [sessions, setSessions] = useState<ChatSessionMeta[]>(loadSessions);
-  const [activeSessionId, setActiveSessionId] = useState<string>(() =>
-    loadActiveId(loadSessions()),
-  );
-  const [messages, setMessages] = useState<ChatMessage[]>(() =>
-    loadMessages(loadActiveId(loadSessions())),
-  );
+  const [sessions, setSessions] = useState<ChatSessionMeta[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string>("");
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
 
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
@@ -55,105 +34,195 @@ export function useChatSession() {
   const activeIdRef = useRef(activeSessionId);
   activeIdRef.current = activeSessionId;
 
-  const persistSessions = useCallback((next: ChatSessionMeta[]) => {
-    sessionsRef.current = next;
-    setSessions(next);
-    writeStorage(STORAGE_KEYS.SESSIONS, next);
+  // Load sessions on mount and set active session
+  useEffect(() => {
+    let cancelled = false;
+
+    async function init() {
+      const { data, error } = await supabase
+        .from("chat_sessions")
+        .select("*")
+        .order("updated_at", { ascending: false });
+
+      if (cancelled || error) return;
+
+      if (!data || data.length === 0) {
+        // Bootstrap a fresh session if DB is empty
+        const row = makeSessionRow();
+        await supabase.from("chat_sessions").insert(row);
+        const fresh = rowToSession(row);
+        setSessions([fresh]);
+        setActiveSessionId(fresh.id);
+        setIsLoading(false);
+        return;
+      }
+
+      const mapped = data.map(rowToSession);
+      setSessions(mapped);
+
+      const firstId = mapped[0].id;
+      setActiveSessionId(firstId);
+
+      const { data: msgs } = await supabase
+        .from("chat_messages")
+        .select("*")
+        .eq("session_id", firstId)
+        .order("created_at", { ascending: true });
+
+      if (!cancelled) {
+        setMessages((msgs ?? []).map(rowToMessage));
+        setIsLoading(false);
+      }
+    }
+
+    init();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const persistActiveId = useCallback((id: string) => {
-    activeIdRef.current = id;
+  const switchSession = useCallback(async (id: string) => {
+    if (id === activeIdRef.current) return;
     setActiveSessionId(id);
-    writeStorage(STORAGE_KEYS.ACTIVE_SESSION, id);
+    activeIdRef.current = id;
+
+    const { data } = await supabase
+      .from("chat_messages")
+      .select("*")
+      .eq("session_id", id)
+      .order("created_at", { ascending: true });
+
+    setMessages((data ?? []).map(rowToMessage));
   }, []);
 
-  const persistMessages = useCallback(
-    (sessionId: string, msgs: ChatMessage[]) => {
-      messagesRef.current = msgs;
-      setMessages(msgs);
-      writeStorage(STORAGE_KEYS.sessionMessages(sessionId), msgs);
+  const createSession = useCallback(async () => {
+    const row = makeSessionRow();
+    await supabase.from("chat_sessions").insert(row);
+    const session = rowToSession(row);
+
+    const next = [session, ...sessionsRef.current];
+    setSessions(next);
+    sessionsRef.current = next;
+
+    setActiveSessionId(session.id);
+    activeIdRef.current = session.id;
+
+    setMessages([]);
+    messagesRef.current = [];
+
+    return session.id;
+  }, []);
+
+  const deleteSession = useCallback(
+    async (id: string) => {
+      // Cascade deletes messages via FK
+      await supabase.from("chat_sessions").delete().eq("id", id);
+
+      const remaining = sessionsRef.current.filter((s) => s.id !== id);
+
+      if (id === activeIdRef.current) {
+        if (remaining.length > 0) {
+          setSessions(remaining);
+          sessionsRef.current = remaining;
+
+          const nextId = remaining[0].id;
+          setActiveSessionId(nextId);
+          activeIdRef.current = nextId;
+
+          const { data } = await supabase
+            .from("chat_messages")
+            .select("*")
+            .eq("session_id", nextId)
+            .order("created_at", { ascending: true });
+
+          setMessages((data ?? []).map(rowToMessage));
+          messagesRef.current = (data ?? []).map(rowToMessage);
+        } else {
+          // No sessions left — create a fresh one
+          const row = makeSessionRow();
+          await supabase.from("chat_sessions").insert(row);
+          const fresh = rowToSession(row);
+
+          setSessions([fresh]);
+          sessionsRef.current = [fresh];
+          setActiveSessionId(fresh.id);
+          activeIdRef.current = fresh.id;
+          setMessages([]);
+          messagesRef.current = [];
+        }
+      } else {
+        setSessions(remaining);
+        sessionsRef.current = remaining;
+      }
     },
     [],
   );
 
-  const createSession = useCallback(() => {
-    const session = makeSession();
-    const updated = [session, ...sessionsRef.current];
-    persistSessions(updated);
-    persistActiveId(session.id);
-    persistMessages(session.id, []);
-    return session.id;
-  }, [persistSessions, persistActiveId, persistMessages]);
-
-  const switchSession = useCallback(
-    (id: string) => {
-      if (id === activeIdRef.current) return;
-      persistActiveId(id);
-      const msgs = loadMessages(id);
-      messagesRef.current = msgs;
-      setMessages(msgs);
-    },
-    [persistActiveId],
-  );
-
-  const deleteSession = useCallback(
-    (id: string) => {
-      removeStorage(STORAGE_KEYS.sessionMessages(id));
-      const remaining = sessionsRef.current.filter((s) => s.id !== id);
-      persistSessions(remaining);
-
-      if (id === activeIdRef.current) {
-        if (remaining.length > 0) {
-          persistActiveId(remaining[0].id);
-          const msgs = loadMessages(remaining[0].id);
-          messagesRef.current = msgs;
-          setMessages(msgs);
-        } else {
-          const fresh = makeSession();
-          persistSessions([fresh]);
-          persistActiveId(fresh.id);
-          persistMessages(fresh.id, []);
-        }
-      }
-    },
-    [persistSessions, persistActiveId, persistMessages],
-  );
-
-  const addMessage = useCallback(
-    (message: ChatMessage) => {
-      const currentId = activeIdRef.current;
-      if (!currentId) return;
-
-      const nextMessages = [...messagesRef.current, message];
-      persistMessages(currentId, nextMessages);
-
-      const updated = sessionsRef.current.map((s) => {
-        if (s.id !== currentId) return s;
-        const needsTitle =
-          s.title === "새 대화" && message.role === "user";
-        return {
-          ...s,
-          updatedAt: Date.now(),
-          ...(needsTitle
-            ? { title: message.content.slice(0, 30) }
-            : {}),
-        };
-      });
-      persistSessions(updated);
-    },
-    [persistMessages, persistSessions],
-  );
-
-  const clearMessages = useCallback(() => {
+  const addMessage = useCallback((message: ChatMessage) => {
     const currentId = activeIdRef.current;
     if (!currentId) return;
-    persistMessages(currentId, []);
-  }, [persistMessages]);
+
+    // Optimistic update
+    const nextMessages = [...messagesRef.current, message];
+    setMessages(nextMessages);
+    messagesRef.current = nextMessages;
+
+    const now = Date.now();
+    const needsTitle =
+      sessionsRef.current.find((s) => s.id === currentId)?.title === "새 대화" &&
+      message.role === "user";
+
+    const updatedSessions = sessionsRef.current.map((s) => {
+      if (s.id !== currentId) return s;
+      return {
+        ...s,
+        updatedAt: now,
+        ...(needsTitle ? { title: message.content.slice(0, 30) } : {}),
+      };
+    });
+    setSessions(updatedSessions);
+    sessionsRef.current = updatedSessions;
+
+    // Persist to DB
+    supabase
+      .from("chat_messages")
+      .insert({
+        id: message.id,
+        session_id: currentId,
+        role: message.role,
+        content: message.content,
+        tool_calls: message.toolCalls ?? null,
+        created_at: message.createdAt,
+      })
+      .then(() => {
+        const titleUpdate = needsTitle
+          ? { updated_at: now, title: message.content.slice(0, 30) }
+          : { updated_at: now };
+        return supabase
+          .from("chat_sessions")
+          .update(titleUpdate)
+          .eq("id", currentId);
+      });
+  }, []);
+
+  const clearMessages = useCallback(async () => {
+    const currentId = activeIdRef.current;
+    if (!currentId) return;
+
+    await supabase
+      .from("chat_messages")
+      .delete()
+      .eq("session_id", currentId);
+
+    setMessages([]);
+    messagesRef.current = [];
+  }, []);
 
   return {
     sessions,
     activeSessionId,
     messages,
+    isLoading,
     addMessage,
     setMessages,
     clearMessages,

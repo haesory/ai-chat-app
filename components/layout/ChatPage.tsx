@@ -48,7 +48,7 @@ export function ChatPage() {
     async (content: string) => {
       let sessionId = activeSessionId;
       if (!sessionId) {
-        sessionId = createSession();
+        sessionId = await createSession();
       }
 
       const userMessage: ChatMessage = {
