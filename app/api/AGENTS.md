@@ -15,7 +15,7 @@ app/api/
 ```
 
 **Dependencies (add via pnpm as needed):**
-- `@google/generative-ai` — Gemini SDK (server-side only)
+- `@google/genai` — Google Gen AI SDK (server-side only, replaces legacy `@google/generative-ai`)
 - Native `fetch` for MCP HTTP transport
 
 ---

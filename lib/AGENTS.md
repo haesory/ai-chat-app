@@ -21,7 +21,7 @@ lib/
 
 - `gemini.ts` and `mcp-client.ts` are **server-only** — never import them in client components or hooks. Add `"server-only"` package import at the top once installed.
 - `errors.ts`, `session.ts`, `storage-keys.ts`, `utils.ts` are **isomorphic** (safe on both server and client).
-- Use `@google/generative-ai` SDK for Gemini. Never call the Gemini REST endpoint with raw `fetch`.
+- Use `@google/genai` SDK for Gemini (replaces legacy `@google/generative-ai`). Never call the Gemini REST endpoint with raw `fetch`.
 - Read env vars only inside server-only modules. Never re-export them.
 
 ---
@@ -32,23 +32,24 @@ lib/
 
 ```typescript
 import "server-only";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenAI, type Content } from "@google/genai";
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-export function getModel() {
-  return genAI.getGenerativeModel({
-    model: process.env.LLM_MODEL ?? "gemini-1.5-flash",
-  });
+function toGeminiContents(messages: ChatMessage[]): Content[] {
+  return messages.map((msg) => ({
+    role: msg.role === "user" ? "user" : "model",
+    parts: [{ text: msg.content }],
+  }));
 }
 
 export async function* streamChat(messages: ChatMessage[], signal: AbortSignal) {
-  const model = getModel();
-  const chat = model.startChat({ history: toGeminiHistory(messages) });
-  const result = await chat.sendMessageStream(lastUserMessage(messages));
-  for await (const chunk of result.stream) {
+  const model = process.env.LLM_MODEL ?? "gemini-2.5-flash-lite";
+  const contents = toGeminiContents(messages);
+  const response = await ai.models.generateContentStream({ model, contents });
+  for await (const chunk of response) {
     if (signal.aborted) return;
-    yield chunk.text();
+    if (chunk.text) yield chunk.text;
   }
 }
 ```
