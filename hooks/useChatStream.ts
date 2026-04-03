@@ -2,11 +2,27 @@
 
 import { useState, useCallback, useRef, useEffect } from "react";
 import { mapError, type AppError } from "@/lib/errors";
-import type { ChatMessage } from "@/lib/types";
+import type { ChatMessage, ToolCallInfo, McpContentPart } from "@/lib/types";
+
+interface SSEToolCall {
+  id: string;
+  name: string;
+  serverId: string;
+  serverName: string;
+  arguments: Record<string, unknown>;
+}
+
+interface SSEToolResult {
+  callId: string;
+  content: McpContentPart[];
+  isError?: boolean;
+}
 
 interface SSEDataChunk {
   text?: string;
   error?: AppError;
+  toolCall?: SSEToolCall;
+  toolResult?: SSEToolResult;
 }
 
 function parseSSELines(raw: string): SSEDataChunk[] {
@@ -29,6 +45,7 @@ export function useChatStream() {
   const [tokens, setTokens] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<AppError | null>(null);
+  const [toolCalls, setToolCalls] = useState<ToolCallInfo[]>([]);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -37,70 +54,108 @@ export function useChatStream() {
     };
   }, []);
 
-  const send = useCallback(async (messages: ChatMessage[]) => {
-    abortRef.current?.abort();
-    abortRef.current = new AbortController();
-    setTokens("");
-    setIsStreaming(true);
-    setError(null);
+  const send = useCallback(
+    async (
+      messages: ChatMessage[],
+      enabledServerIds?: string[],
+    ): Promise<{ text: string; toolCalls: ToolCallInfo[] }> => {
+      abortRef.current?.abort();
+      abortRef.current = new AbortController();
+      setTokens("");
+      setIsStreaming(true);
+      setError(null);
+      setToolCalls([]);
 
-    try {
-      const res = await fetch("/api/chat/stream", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages }),
-        signal: abortRef.current.signal,
-      });
+      const pendingCalls = new Map<string, ToolCallInfo>();
 
-      if (!res.ok) {
-        const errorBody = await res.json().catch(() => ({}));
-        setError({
-          code: errorBody.code ?? "SERVER_ERROR",
-          message: errorBody.message ?? `HTTP ${res.status}`,
-          retryable: res.status >= 500,
+      try {
+        const res = await fetch("/api/chat/stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages, enabledServerIds }),
+          signal: abortRef.current.signal,
         });
-        setIsStreaming(false);
-        return "";
-      }
 
-      const reader = res.body!.getReader();
-      const decoder = new TextDecoder();
-      let accumulated = "";
+        if (!res.ok) {
+          const errorBody = await res.json().catch(() => ({}));
+          setError({
+            code: errorBody.code ?? "SERVER_ERROR",
+            message: errorBody.message ?? `HTTP ${res.status}`,
+            retryable: res.status >= 500,
+          });
+          setIsStreaming(false);
+          return { text: "", toolCalls: [] };
+        }
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+        const reader = res.body!.getReader();
+        const decoder = new TextDecoder();
+        let accumulated = "";
+        const completedCalls: ToolCallInfo[] = [];
 
-        const raw = decoder.decode(value, { stream: true });
-        const chunks = parseSSELines(raw);
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        for (const chunk of chunks) {
-          if (chunk.error) {
-            setError(chunk.error);
-            setIsStreaming(false);
-            return accumulated;
-          }
-          if (chunk.text) {
-            accumulated += chunk.text;
-            setTokens(accumulated);
+          const raw = decoder.decode(value, { stream: true });
+          const chunks = parseSSELines(raw);
+
+          for (const chunk of chunks) {
+            if (chunk.error) {
+              setError(chunk.error);
+              setIsStreaming(false);
+              return {
+                text: accumulated,
+                toolCalls: completedCalls,
+              };
+            }
+
+            if (chunk.toolCall) {
+              const tc: ToolCallInfo = {
+                id: chunk.toolCall.id,
+                toolName: chunk.toolCall.name,
+                serverId: chunk.toolCall.serverId,
+                serverName: chunk.toolCall.serverName,
+                arguments: chunk.toolCall.arguments,
+              };
+              pendingCalls.set(tc.id, tc);
+              completedCalls.push(tc);
+              setToolCalls([...completedCalls]);
+            }
+
+            if (chunk.toolResult) {
+              const existing = pendingCalls.get(chunk.toolResult.callId);
+              if (existing) {
+                existing.result = {
+                  content: chunk.toolResult.content,
+                  isError: chunk.toolResult.isError,
+                };
+                setToolCalls([...completedCalls]);
+              }
+            }
+
+            if (chunk.text) {
+              accumulated += chunk.text;
+              setTokens(accumulated);
+            }
           }
         }
-      }
 
-      return accumulated;
-    } catch (err) {
-      if ((err as Error).name !== "AbortError") {
-        setError(mapError(err));
+        return { text: accumulated, toolCalls: completedCalls };
+      } catch (err) {
+        if ((err as Error).name !== "AbortError") {
+          setError(mapError(err));
+        }
+        return { text: "", toolCalls: [] };
+      } finally {
+        setIsStreaming(false);
       }
-      return "";
-    } finally {
-      setIsStreaming(false);
-    }
-  }, []);
+    },
+    [],
+  );
 
   const cancel = useCallback(() => {
     abortRef.current?.abort();
   }, []);
 
-  return { tokens, isStreaming, error, send, cancel };
+  return { tokens, isStreaming, error, toolCalls, send, cancel };
 }
