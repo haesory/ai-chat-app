@@ -23,23 +23,13 @@ export function removeStorage(key: string): void {
 }
 
 export function useLocalStorage<T>(key: string, defaultValue: T) {
-  const [value, setValue] = useState<T>(() => {
-    if (typeof window === "undefined") return defaultValue;
-    try {
-      const item = window.localStorage.getItem(key);
-      return item ? (JSON.parse(item) as T) : defaultValue;
-    } catch {
-      return defaultValue;
-    }
-  });
+  const [value, setValue] = useState<T>(() => readStorage(key, defaultValue));
 
   const set = useCallback(
     (next: T | ((prev: T) => T)) => {
       setValue((prev) => {
         const resolved = next instanceof Function ? next(prev) : next;
-        if (typeof window !== "undefined") {
-          window.localStorage.setItem(key, JSON.stringify(resolved));
-        }
+        writeStorage(key, resolved);
         return resolved;
       });
     },
